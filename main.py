@@ -5,14 +5,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def csv_to_matrix(content):
-    """Convert CSV content to a matrix."""
-    matrix = []
-    csv_reader = csv.reader(StringIO(content))
-    for row in csv_reader:
-        matrix.append(row)
-    return matrix
-
 
 def read_sprints(file_path):
     """Read sprint information from CSV file."""
@@ -28,103 +20,126 @@ def read_sprints(file_path):
     return sprint_map
 
 
-def visualize_dependencies(matrix, sprint_map):
-    """Create a directed graph visualization of task dependencies with sprint information."""
-    G = nx.DiGraph()
-    
-    # Process each column in the matrix
-    for column in matrix:
-        if len(column) < 1:
+def read_task_dependencies(filepath):
+    """Read task dependencies from CSV file and return content as string."""
+    try:
+        with open(filepath, 'r') as file:
+            return file.read()
+    except FileNotFoundError:
+        print(f"Error: File {filepath} not found")
+        return ""
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return ""
+
+
+def parse_tasks(content):
+    """Parse CSV content and return list of tasks and their dependencies.
+    If task1 is blocked by task2, creates an edge from task2 to task1"""
+    tasks = set()
+    dependencies = []
+    csv_reader = csv.reader(StringIO(content))
+    for row in csv_reader:
+        # Skip empty rows
+        if not row:
             continue
-        task = column[0]
-        # Add node with sprint information
-        sprint_info = sprint_map.get(task, ("No Sprint", 0))
-        G.add_node(task, sprint=sprint_info[0], sprint_num=sprint_info[1])
-        
-        # Add edges from blocking tasks to the main task
-        for blocking_task in column[1:]:
-            if blocking_task:
-                G.add_edge(blocking_task, task)
+        # The first task is blocked by the following tasks
+        blocked_task = row[0]
+        for blocking_task in row[1:]:
+            if blocking_task:  # Only add if blocking_task is not empty
+                tasks.add(blocking_task)
+                tasks.add(blocked_task)
+                # Create edge from blocking task to blocked task
+                dependencies.append((blocking_task, blocked_task))
+    return sorted(list(tasks)), dependencies
+
+def main():
+    content = read_task_dependencies('doc/Isblockedby.csv')
+    tasks, dependencies = parse_tasks(content)
+    sprint_data = read_sprints('doc/Sprints.csv')
+
+    dependenciesWithSprints = []
+    task_sprint_map = {}  # For quick sprint number lookup
+    # Create a mapping of tasks to their sprint information
+    for task in tasks:
+        if task in sprint_data:
+            sprint, sprint_num = sprint_data[task]
+        else:
+            sprint, sprint_num = "Future Implementation", 999
+        dependenciesWithSprints.append((task, sprint, sprint_num))
+        task_sprint_map[task] = sprint_num
+
+    # Create a directed graph from the dependencies
+    G = nx.DiGraph()
+    G.add_edges_from(dependencies)
     
-    # Create the visualization with different colors per sprint
+    # Identify problematic edges (earlier sprint blocked by later sprint)
+    red_edges = []
+    black_edges = []
+    for source, target in G.edges():
+        source_sprint = task_sprint_map.get(source, -1)
+        target_sprint = task_sprint_map.get(target, -1)
+        if target_sprint != -1 and source_sprint > target_sprint:
+            red_edges.append((source, target))
+        else:
+            black_edges.append((source, target))
+
+    # Draw the graph
     plt.figure(figsize=(15, 8))
     
     # Create custom layout based on sprint numbers
     pos = {}
+    all_sprints = sorted(list(set(task_sprint_map.values())))
+    sprint_to_x = {sprint: idx for idx, sprint in enumerate(all_sprints)}
     
-    # Group nodes by sprint
-    nodes_by_sprint = {}
-    for node, attrs in G.nodes(data=True):
-        sprint_num = attrs.get('sprint_num', 0)  # Use get() with default value
-        if sprint_num not in nodes_by_sprint:
-            nodes_by_sprint[sprint_num] = []
-        nodes_by_sprint[sprint_num].append(node)
+    # Group tasks by sprint
+    tasks_by_sprint = {}
+    for task, sprint_num in task_sprint_map.items():
+        if sprint_num not in tasks_by_sprint:
+            tasks_by_sprint[sprint_num] = []
+        tasks_by_sprint[sprint_num].append(task)
     
-    # Calculate max sprint number
-    max_sprint = max(nodes_by_sprint.keys()) if nodes_by_sprint else 0
+    # Position nodes
+    for sprint_num, tasks in tasks_by_sprint.items():
+        x = sprint_to_x[sprint_num]
+        for i, task in enumerate(tasks):
+            y = i - len(tasks)/2
+            pos[task] = (x, y)
     
-    # Position nodes from left to right based on sprint
-    for sprint_num in sorted(nodes_by_sprint.keys()):
-        nodes = nodes_by_sprint[sprint_num]
-        x = sprint_num / (max_sprint + 1) if max_sprint > 0 else 0  # Normalize x position
-        for i, node in enumerate(nodes):
-            y = (i + 1) / (len(nodes) + 1)  # Space nodes vertically within their sprint column
-            pos[node] = (x, y)
+    # Draw regular edges in black
+    nx.draw_networkx_edges(G, pos, edgelist=black_edges, edge_color='black', arrows=True)
     
-    # Get unique sprints for coloring (excluding sprint numbers)
-    sprints = list(set(data[0] for data in sprint_map.values()))
-    if "No Sprint" not in sprints:
-        sprints.append("No Sprint")
-    colors = plt.cm.Set3(np.linspace(0, 1, len(sprints)))
-    sprint_color_map = dict(zip(sprints, colors))
-      # Draw nodes colored by sprint
-    for sprint in sprints:
-        sprint_nodes = [node for node, attrs in G.nodes(data=True) if attrs.get('sprint', "No Sprint") == sprint]
-        if sprint_nodes:
-            nx.draw_networkx_nodes(G, pos, nodelist=sprint_nodes, 
-                                 node_color=[sprint_color_map[sprint]], 
-                                 node_size=2000, label=sprint)
+    # Draw problematic edges in red with increased width
+    nx.draw_networkx_edges(G, pos, edgelist=red_edges, edge_color='red', arrows=True, width=2)
     
-    # Draw edges with different colors based on sprint order
-    edges = G.edges()
-    red_edges = []
-    black_edges = []
-    for edge in edges:
-        source_sprint = G.nodes[edge[0]].get('sprint_num', 0)
-        target_sprint = G.nodes[edge[1]].get('sprint_num', 0)
-        if source_sprint > target_sprint and source_sprint != 0 and target_sprint != 0:
-            red_edges.append(edge)
-        else:
-            black_edges.append(edge)
+    # Draw nodes
+    nx.draw_networkx_nodes(G, pos, node_size=2000, node_color='lightblue')
+    nx.draw_networkx_labels(G, pos, font_size=10)
     
-    # Draw regular dependencies in black
-    nx.draw_networkx_edges(G, pos, edgelist=black_edges, edge_color='black', arrowsize=20)
-    # Draw problematic dependencies in red
-    nx.draw_networkx_edges(G, pos, edgelist=red_edges, edge_color='red', arrowsize=20)
-      # Create labels with sprint information
-    labels = {}
-    for node in G.nodes():
-        sprint_info = G.nodes[node].get('sprint', "No Sprint")
-        labels[node] = f"{node}\n({sprint_info})"
+    # Add edge labels for problematic dependencies
+    edge_labels = {(s,t): "Is blocked by" for (s,t) in red_edges}
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='red')
     
-    nx.draw_networkx_labels(G, pos, labels, font_size=8)
-    
-    plt.title("Task Dependencies by Sprint\nRed arrows indicate blocking tasks in later sprints")
-    plt.legend()
+    plt.title("Task Dependencies (Red = Task blocked by later sprint)")
+
+    # Annotate nodes with sprint information
+    for task, sprint, sprint_num in dependenciesWithSprints:
+        if task in pos:
+            plt.annotate(sprint, xy=pos[task], textcoords="offset points", xytext=(0,10), ha='center')
     plt.show()
 
+    # Print problematic dependencies
+    if red_edges:
+        print("\nProblematic Dependencies (Tasks blocked by later sprints):")
+        print("-" * 60)
+        for source, target in red_edges:
+            source_sprint = sprint_data.get(source, ("Future Implementation", -1))[0]
+            target_sprint = sprint_data.get(target, ("Future Implementation", -1))[0]
+            print(f"• {target} ({target_sprint}) is blocked by {source} ({source_sprint})")
+    else:
+        print("No problematic dependencies found.")
 
-def main():
-    content = read_file('doc/HasDependenyList.csv')
-    sprint_data = read_sprints('doc/Sprints.csv')
-    matrix = csv_to_matrix(content)
-    visualize_dependencies(matrix, sprint_data)
 
-
-def read_file(file_path):
-    """Read the content of a file and return it."""
-    with open(file_path, 'r') as file:
-        return file.read()
 
 
 if __name__ == "__main__":
